@@ -71,6 +71,11 @@ instances:
     #
     # pid_file: <PID_FILE>
 
+    ## @param pid_breakdown - boolean - optional - default: false
+    ## If filters match multiple processes, report on each individually, adding a "pid" tag.
+    #
+    # pid_breakdown: false
+
     ## @param exact_match - boolean - optional - default: true
     ## Matches your search_string on proc.name().
     ## If you want to match on a substring within proc.cmdline(), set this to false
