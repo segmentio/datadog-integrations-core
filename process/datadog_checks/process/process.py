@@ -71,6 +71,7 @@ class ProcessCheck(AgentCheck):
         self.tags = self.instance.get('tags', [])
         self.exact_match = is_affirmative(self.instance.get('exact_match', True))
         self.search_string = self.instance.get('search_string', None)
+        self.pid_breakdown = self.instance.get('pid_breakdown', False)
         self.ignore_ad = is_affirmative(self.instance.get('ignore_denied_access', True))
         self.pid = self.instance.get('pid')
         self.pid_file = self.instance.get('pid_file')
@@ -439,42 +440,51 @@ class ProcessCheck(AgentCheck):
         if self.user:
             pids = self._filter_by_user(self.user, pids)
 
-        proc_state = self.get_process_state(self.name, pids)
-
-        # FIXME 8.x remove the `name` tag
-        tags.extend(['process_name:{}'.format(self.name), self.name])
-
-        self.log.debug('ProcessCheck: process %s analysed', self.name)
-        self.gauge('system.processes.number', len(pids), tags=tags)
-
         if len(pids) == 0:
             self.warning("No matching process '%s' was found", self.name)
             # reset the process caches now, something changed
             self.last_pid_cache_ts[self.name] = 0
             self.process_list_cache.reset()
 
-        for attr, mname in iteritems(ATTR_TO_METRIC):
-            vals = [x for x in proc_state[attr] if x is not None]
-            # skip []
-            if vals:
-                sum_vals = sum(vals)
-                if attr == 'run_time':
-                    self.gauge('system.processes.{}.avg'.format(mname), sum_vals / len(vals), tags=tags)
-                    self.gauge('system.processes.{}.max'.format(mname), max(vals), tags=tags)
-                    self.gauge('system.processes.{}.min'.format(mname), min(vals), tags=tags)
+        self.gauge('system.processes.number', len(pids), tags=tags)
+        # FIXME 8.x remove the `name` tag
+        tags.extend(['process_name:{}'.format(self.name), self.name])
+        self.log.debug('ProcessCheck: process %s analysed', self.name)
 
-                # FIXME 8.x: change this prefix?
-                else:
-                    self.gauge('system.processes.{}'.format(mname), sum_vals, tags=tags)
-                    if mname in ['ioread_bytes', 'iowrite_bytes']:
-                        self.monotonic_count('system.processes.{}_count'.format(mname), sum_vals, tags=tags)
+        groups = {'all': pids}
+        if self.pid_breakdown:
+            groups = {pid: {pid} for pid in pids}
 
-        for attr, mname in iteritems(ATTR_TO_METRIC_RATE):
-            vals = [x for x in proc_state[attr] if x is not None]
-            if vals:
-                self.rate('system.processes.{}'.format(mname), sum(vals), tags=tags)
+        for group_id, group_pids in groups.items():
+            group_tags = tags
+            if self.pid_breakdown:
+                group_tags = tags.copy()
+                group_tags.append("pid:{}".format(group_id))
 
-        self._process_service_check(self.name, len(pids), self.instance.get('thresholds', None), tags)
+            proc_state = self.get_process_state(self.name, group_pids)
+
+            for attr, mname in iteritems(ATTR_TO_METRIC):
+                vals = [x for x in proc_state[attr] if x is not None]
+                # skip []
+                if vals:
+                    sum_vals = sum(vals)
+                    if attr == 'run_time':
+                        self.gauge('system.processes.{}.avg'.format(mname), sum_vals / len(vals), tags=group_tags)
+                        self.gauge('system.processes.{}.max'.format(mname), max(vals), tags=group_tags)
+                        self.gauge('system.processes.{}.min'.format(mname), min(vals), tags=group_tags)
+
+                    # FIXME 8.x: change this prefix?
+                    else:
+                        self.gauge('system.processes.{}'.format(mname), sum_vals, tags=group_tags)
+                        if mname in ['ioread_bytes', 'iowrite_bytes']:
+                            self.monotonic_count('system.processes.{}_count'.format(mname), sum_vals, tags=group_tags)
+
+            for attr, mname in iteritems(ATTR_TO_METRIC_RATE):
+                vals = [x for x in proc_state[attr] if x is not None]
+                if vals:
+                    self.rate('system.processes.{}'.format(mname), sum(vals), tags=group_tags)
+
+        self._process_service_check(self.name, len(pids), self.instance.get('thresholds', None), group_tags)
 
     def _get_pid_set(self, pid):
         try:
