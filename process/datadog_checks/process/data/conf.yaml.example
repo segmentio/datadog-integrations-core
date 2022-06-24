@@ -55,6 +55,13 @@ instances:
     #   - <SEARCH_STRING_1>
     #   - <SEARCH_STRING_2>
 
+    ## @param exclude_string - list of strings - optional
+    ## If one of the elements in the list matches, the process will not be included even if it matches "search_string".
+    ## This param is ignored if `exact_match: true`.
+    # exclude_string:
+    #   - <EXCLUDE_STRING_1>
+    #   - <EXCLUDE_STRING_2>
+
     ## @param pid - integer - optional
     ## A Process id to match.
     ##

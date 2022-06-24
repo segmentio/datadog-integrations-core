@@ -71,6 +71,7 @@ class ProcessCheck(AgentCheck):
         self.tags = self.instance.get('tags', [])
         self.exact_match = is_affirmative(self.instance.get('exact_match', True))
         self.search_string = self.instance.get('search_string', None)
+        self.exclude_string = self.instance.get('exclude_string', None)
         self.pid_breakdown = self.instance.get('pid_breakdown', False)
         self.ignore_ad = is_affirmative(self.instance.get('ignore_denied_access', True))
         self.pid = self.instance.get('pid')
@@ -122,7 +123,7 @@ class ProcessCheck(AgentCheck):
         now = time.time()
         return now - self.last_pid_cache_ts.get(name, 0) > self.pid_cache_duration
 
-    def find_pids(self, name, search_string, exact_match, ignore_ad=True):
+    def find_pids(self, name, search_string, exclude_string, exact_match, ignore_ad=True):
         """
         Create a set of pids of selected processes.
         Search for search_string
@@ -153,48 +154,65 @@ class ProcessCheck(AgentCheck):
                 if not refresh_ad_cache and proc.pid in self.ad_cache:
                     continue
 
-                found = False
-                for string in search_string:
-                    try:
-                        # FIXME 8.x: All has been deprecated
-                        # from the doc, should be removed
-                        if string == 'All':
-                            found = True
-                        if exact_match:
-                            if os.name == 'nt':
-                                if proc.name().lower() == string.lower():
-                                    found = True
-                            else:
-                                if proc.name() == string:
-                                    found = True
+                try:
+                    proc_name = proc.name()
+                    cmdline = proc.cmdline()
+                except psutil.NoSuchProcess:
+                    # As the process list isn't necessarily scanned right after it's created
+                    # (since we're using a shared cache), there can be cases where processes
+                    # in the list are dead when an instance of the check tries to scan them.
+                    self.log.debug('Process disappeared while scanning')
+                    continue
+                except psutil.AccessDenied as e:
+                    ad_error_logger('Access denied to process with PID {}'.format(proc.pid))
+                    ad_error_logger('Error: {}'.format(e))
+                    if refresh_ad_cache:
+                        self.ad_cache.add(proc.pid)
+                    if not ignore_ad:
+                        raise
+                    continue
 
+                found = False
+                excluded = False
+                for string in search_string:
+                    # FIXME 8.x: All has been deprecated
+                    # from the doc, should be removed
+                    if string == 'All':
+                        found = True
+                    if exact_match:
+                        if os.name == 'nt':
+                            if proc_name.lower() == string.lower():
+                                found = True
                         else:
-                            cmdline = proc.cmdline()
-                            if os.name == 'nt':
-                                lstring = string.lower()
-                                if re.search(lstring, ' '.join(cmdline).lower()):
-                                    found = True
-                            else:
-                                if re.search(string, ' '.join(cmdline)):
-                                    found = True
-                    except psutil.NoSuchProcess:
-                        # As the process list isn't necessarily scanned right after it's created
-                        # (since we're using a shared cache), there can be cases where processes
-                        # in the list are dead when an instance of the check tries to scan them.
-                        self.log.debug('Process disappeared while scanning')
-                    except psutil.AccessDenied as e:
-                        ad_error_logger('Access denied to process with PID {}'.format(proc.pid))
-                        ad_error_logger('Error: {}'.format(e))
-                        if refresh_ad_cache:
-                            self.ad_cache.add(proc.pid)
-                        if not ignore_ad:
-                            raise
+                            if proc_name == string:
+                                found = True
+
                     else:
-                        if refresh_ad_cache:
-                            self.ad_cache.discard(proc.pid)
-                        if found:
-                            matching_pids.add(proc.pid)
-                            break
+                        if os.name == 'nt':
+                            lstring = string.lower()
+                            joined_cmdline = ' '.join(cmdline).lower()
+                            if re.search(lstring, joined_cmdline):
+                                found = True
+
+                            if exclude_string:
+                                for exclude in exclude_string:
+                                    if re.search(exclude.lower(), joined_cmdline):
+                                        excluded = True
+                        else:
+                            joined_cmdline = ' '.join(cmdline)
+                            if re.search(string, joined_cmdline):
+                                found = True
+
+                            if exclude_string:
+                                for exclude in exclude_string:
+                                    if re.search(exclude, joined_cmdline):
+                                        excluded = True
+
+                if refresh_ad_cache:
+                    self.ad_cache.discard(proc.pid)
+                if found and not excluded:
+                    matching_pids.add(proc.pid)
+                    break
 
             if not matching_pids:
                 # Allow debug logging while preserving warning check state.
