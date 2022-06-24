@@ -502,7 +502,7 @@ class ProcessCheck(AgentCheck):
                 if vals:
                     self.rate('system.processes.{}'.format(mname), sum(vals), tags=group_tags)
 
-        self._process_service_check(self.name, len(pids), self.instance.get('thresholds', None), group_tags)
+        self._process_service_check(self.name, len(pids), self.instance.get('thresholds', None), tags)
 
     def _get_pid_set(self, pid):
         try:
