@@ -435,7 +435,7 @@ class ProcessCheck(AgentCheck):
             raise KeyError('The "name" of process groups is mandatory')
 
         if self.search_string is not None:
-            pids = self.find_pids(self.name, self.search_string, self.exact_match, ignore_ad=self.ignore_ad)
+            pids = self.find_pids(self.name, self.search_string, self.exclude_string, self.exact_match, ignore_ad=self.ignore_ad)
         elif self.pid is not None:
             # we use Process(pid) as a means to search, if pid not found
             # psutil.NoSuchProcess is raised.
