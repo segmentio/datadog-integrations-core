@@ -212,7 +212,6 @@ class ProcessCheck(AgentCheck):
                     self.ad_cache.discard(proc.pid)
                 if found and not excluded:
                     matching_pids.add(proc.pid)
-                    break
 
             if not matching_pids:
                 # Allow debug logging while preserving warning check state.
