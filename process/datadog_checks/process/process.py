@@ -71,6 +71,8 @@ class ProcessCheck(AgentCheck):
         self.tags = self.instance.get('tags', [])
         self.exact_match = is_affirmative(self.instance.get('exact_match', True))
         self.search_string = self.instance.get('search_string', None)
+        self.exclude_string = self.instance.get('exclude_string', None)
+        self.pid_breakdown = self.instance.get('pid_breakdown', False)
         self.ignore_ad = is_affirmative(self.instance.get('ignore_denied_access', True))
         self.pid = self.instance.get('pid')
         self.pid_file = self.instance.get('pid_file')
@@ -121,7 +123,7 @@ class ProcessCheck(AgentCheck):
         now = time.time()
         return now - self.last_pid_cache_ts.get(name, 0) > self.pid_cache_duration
 
-    def find_pids(self, name, search_string, exact_match, ignore_ad=True):
+    def find_pids(self, name, search_string, exclude_string, exact_match, ignore_ad=True):
         """
         Create a set of pids of selected processes.
         Search for search_string
@@ -152,48 +154,64 @@ class ProcessCheck(AgentCheck):
                 if not refresh_ad_cache and proc.pid in self.ad_cache:
                     continue
 
-                found = False
-                for string in search_string:
-                    try:
-                        # FIXME 8.x: All has been deprecated
-                        # from the doc, should be removed
-                        if string == 'All':
-                            found = True
-                        if exact_match:
-                            if os.name == 'nt':
-                                if proc.name().lower() == string.lower():
-                                    found = True
-                            else:
-                                if proc.name() == string:
-                                    found = True
+                try:
+                    proc_name = proc.name()
+                    cmdline = proc.cmdline()
+                except psutil.NoSuchProcess:
+                    # As the process list isn't necessarily scanned right after it's created
+                    # (since we're using a shared cache), there can be cases where processes
+                    # in the list are dead when an instance of the check tries to scan them.
+                    self.log.debug('Process disappeared while scanning')
+                    continue
+                except psutil.AccessDenied as e:
+                    ad_error_logger('Access denied to process with PID {}'.format(proc.pid))
+                    ad_error_logger('Error: {}'.format(e))
+                    if refresh_ad_cache:
+                        self.ad_cache.add(proc.pid)
+                    if not ignore_ad:
+                        raise
+                    continue
 
+                found = False
+                excluded = False
+                for string in search_string:
+                    # FIXME 8.x: All has been deprecated
+                    # from the doc, should be removed
+                    if string == 'All':
+                        found = True
+                    if exact_match:
+                        if os.name == 'nt':
+                            if proc_name.lower() == string.lower():
+                                found = True
                         else:
-                            cmdline = proc.cmdline()
-                            if os.name == 'nt':
-                                lstring = string.lower()
-                                if re.search(lstring, ' '.join(cmdline).lower()):
-                                    found = True
-                            else:
-                                if re.search(string, ' '.join(cmdline)):
-                                    found = True
-                    except psutil.NoSuchProcess:
-                        # As the process list isn't necessarily scanned right after it's created
-                        # (since we're using a shared cache), there can be cases where processes
-                        # in the list are dead when an instance of the check tries to scan them.
-                        self.log.debug('Process disappeared while scanning')
-                    except psutil.AccessDenied as e:
-                        ad_error_logger('Access denied to process with PID {}'.format(proc.pid))
-                        ad_error_logger('Error: {}'.format(e))
-                        if refresh_ad_cache:
-                            self.ad_cache.add(proc.pid)
-                        if not ignore_ad:
-                            raise
+                            if proc_name == string:
+                                found = True
+
                     else:
-                        if refresh_ad_cache:
-                            self.ad_cache.discard(proc.pid)
-                        if found:
-                            matching_pids.add(proc.pid)
-                            break
+                        if os.name == 'nt':
+                            lstring = string.lower()
+                            joined_cmdline = ' '.join(cmdline).lower()
+                            if re.search(lstring, joined_cmdline):
+                                found = True
+
+                            if exclude_string:
+                                for exclude in exclude_string:
+                                    if re.search(exclude.lower(), joined_cmdline):
+                                        excluded = True
+                        else:
+                            joined_cmdline = ' '.join(cmdline)
+                            if re.search(string, joined_cmdline):
+                                found = True
+
+                            if exclude_string:
+                                for exclude in exclude_string:
+                                    if re.search(exclude, joined_cmdline):
+                                        excluded = True
+
+                if refresh_ad_cache:
+                    self.ad_cache.discard(proc.pid)
+                if found and not excluded:
+                    matching_pids.add(proc.pid)
 
             if not matching_pids:
                 # Allow debug logging while preserving warning check state.
@@ -416,7 +434,7 @@ class ProcessCheck(AgentCheck):
             raise KeyError('The "name" of process groups is mandatory')
 
         if self.search_string is not None:
-            pids = self.find_pids(self.name, self.search_string, self.exact_match, ignore_ad=self.ignore_ad)
+            pids = self.find_pids(self.name, self.search_string, self.exclude_string, self.exact_match, ignore_ad=self.ignore_ad)
         elif self.pid is not None:
             # we use Process(pid) as a means to search, if pid not found
             # psutil.NoSuchProcess is raised.
@@ -439,40 +457,49 @@ class ProcessCheck(AgentCheck):
         if self.user:
             pids = self._filter_by_user(self.user, pids)
 
-        proc_state = self.get_process_state(self.name, pids)
-
-        # FIXME 8.x remove the `name` tag
-        tags.extend(['process_name:{}'.format(self.name), self.name])
-
-        self.log.debug('ProcessCheck: process %s analysed', self.name)
-        self.gauge('system.processes.number', len(pids), tags=tags)
-
         if len(pids) == 0:
             self.warning("No matching process '%s' was found", self.name)
             # reset the process caches now, something changed
             self.last_pid_cache_ts[self.name] = 0
             self.process_list_cache.reset()
 
-        for attr, mname in iteritems(ATTR_TO_METRIC):
-            vals = [x for x in proc_state[attr] if x is not None]
-            # skip []
-            if vals:
-                sum_vals = sum(vals)
-                if attr == 'run_time':
-                    self.gauge('system.processes.{}.avg'.format(mname), sum_vals / len(vals), tags=tags)
-                    self.gauge('system.processes.{}.max'.format(mname), max(vals), tags=tags)
-                    self.gauge('system.processes.{}.min'.format(mname), min(vals), tags=tags)
+        self.gauge('system.processes.number', len(pids), tags=tags)
+        # FIXME 8.x remove the `name` tag
+        tags.extend(['process_name:{}'.format(self.name), self.name])
+        self.log.debug('ProcessCheck: process %s analysed', self.name)
 
-                # FIXME 8.x: change this prefix?
-                else:
-                    self.gauge('system.processes.{}'.format(mname), sum_vals, tags=tags)
-                    if mname in ['ioread_bytes', 'iowrite_bytes']:
-                        self.monotonic_count('system.processes.{}_count'.format(mname), sum_vals, tags=tags)
+        groups = {'all': pids}
+        if self.pid_breakdown:
+            groups = {pid: {pid} for pid in pids}
 
-        for attr, mname in iteritems(ATTR_TO_METRIC_RATE):
-            vals = [x for x in proc_state[attr] if x is not None]
-            if vals:
-                self.rate('system.processes.{}'.format(mname), sum(vals), tags=tags)
+        for group_id, group_pids in groups.items():
+            group_tags = tags
+            if self.pid_breakdown:
+                group_tags = tags.copy()
+                group_tags.append("pid:{}".format(group_id))
+
+            proc_state = self.get_process_state(self.name, group_pids)
+
+            for attr, mname in iteritems(ATTR_TO_METRIC):
+                vals = [x for x in proc_state[attr] if x is not None]
+                # skip []
+                if vals:
+                    sum_vals = sum(vals)
+                    if attr == 'run_time':
+                        self.gauge('system.processes.{}.avg'.format(mname), sum_vals / len(vals), tags=group_tags)
+                        self.gauge('system.processes.{}.max'.format(mname), max(vals), tags=group_tags)
+                        self.gauge('system.processes.{}.min'.format(mname), min(vals), tags=group_tags)
+
+                    # FIXME 8.x: change this prefix?
+                    else:
+                        self.gauge('system.processes.{}'.format(mname), sum_vals, tags=group_tags)
+                        if mname in ['ioread_bytes', 'iowrite_bytes']:
+                            self.monotonic_count('system.processes.{}_count'.format(mname), sum_vals, tags=group_tags)
+
+            for attr, mname in iteritems(ATTR_TO_METRIC_RATE):
+                vals = [x for x in proc_state[attr] if x is not None]
+                if vals:
+                    self.rate('system.processes.{}'.format(mname), sum(vals), tags=group_tags)
 
         self._process_service_check(self.name, len(pids), self.instance.get('thresholds', None), tags)
 

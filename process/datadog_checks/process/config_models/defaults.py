@@ -46,6 +46,10 @@ def instance_exact_match(field, value):
     return True
 
 
+def instance_pid_breakdown(field, value):
+    return False
+
+
 def instance_ignore_denied_access(field, value):
     return True
 
@@ -67,6 +71,10 @@ def instance_pid_file(field, value):
 
 
 def instance_search_string(field, value):
+    return get_default_field_value(field, value)
+
+
+def instance_exclude_string(field, value):
     return get_default_field_value(field, value)
 
 
